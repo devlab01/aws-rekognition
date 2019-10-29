@@ -15,3 +15,8 @@ A collection of lambda functions that are invoked by Amazon S3 or Amazon API Gat
 * Amazon API Gateway
 * Amazon S3
 * Amazon DynamoDB
+
+#### Starts with arguments
+if no arguments take a photo
+if one argument open the image file and decode it
+if more than on argument exit gracefully and print usage guidance
