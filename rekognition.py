@@ -6,7 +6,6 @@
 import json
 import os
 from sys import argv
-from time import sleep
 
 import boto3
 import cv2
@@ -15,27 +14,43 @@ import numpy as np
 from botocore.exceptions import BotoCoreError, ClientError
 from playsound import playsound
 
+
+class bcolors:
+    HEADER = '\033[95m'
+    BLUE = '\033[94m'
+    GREEN = '\033[92m'
+    YELLOW = '\033[93m'
+    RED = '\033[91m'
+    ENDC = '\033[0m'
+
+
 region = 'eu-west-1'  # change this to switch to another AWS region
 colors = [['lime', 0, 255, 0], ['blue', 255, 0, 0], ['red', 0, 0, 255], ['fuchsia', 255, 0, 255], ['silver', 192, 192, 192],
-          ['cyan', 0, 255, 255], ['orange', 255, 99, 71], ['white', 255,255, 255], ['black', 0, 0, 0], ['gray', 128, 128, 128],
+          ['cyan', 0, 255, 255], ['orange', 255, 99, 71], ['white', 255,
+                                                           255, 255], ['black', 0, 0, 0], ['gray', 128, 128, 128],
           ['green', 0, 128, 0], ['purple', 128, 0, 128], ['navy', 0, 0, 128]]
 
 polly = boto3.client("polly", region_name=region)
 reko = boto3.client('rekognition', region_name=region)
 translate = boto3.client('translate', region_name=region)
-p = inflect.engine()
+s3resource = boto3.resource('s3', region_name=region)
+dynamodb = boto3.resource('dynamodb', region_name=region)
 
+p = inflect.engine()
+bucket = 'my8uck37'
+collectionId = 'myCollection'
+table = dynamodb.Table('ImageCollection')
 
 # Take a photo with USB webcam
 # Set save to True if you want to save the image (in the current working directory)
 # and open Preview to see the image
+
 
 def take_image():
     cam = cv2.VideoCapture(0)
     cv2.namedWindow("opencv_frame")
     cam.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
     cam.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-    img_counter = 0
 
     while True:
         ret, frame = cam.read()
@@ -290,6 +305,135 @@ def draw_bounding_box(cv_img, cv_img_width, cv_img_height, width, height, top, l
                 2, (color[1], color[2], color[3]), 1)
     return cv_img
 
+# compare faces
+
+
+def compare_faces():
+    sourceFile = 'image6.jpg'
+    targetFile = 'image6.jpg'
+
+    imageSource = open(sourceFile, 'rb')
+    imageTarget = open(targetFile, 'rb')
+
+    response = reko.compare_faces(SimilarityThreshold=50,
+                                  SourceImage={'Bytes': imageSource.read()},
+                                  TargetImage={'Bytes': imageTarget.read()})
+
+    # print json.dumps(response, sort_keys=True, indent=4)
+
+    if not response['FaceMatches']:
+        print(bcolors.RED + 'No Match')
+    else:
+        for faceMatch in response['FaceMatches']:
+            position = faceMatch['Face']['BoundingBox']
+            confidence = str(faceMatch['Face']['Confidence'])
+            print(bcolors.GREEN + 'The faces matches with ' +
+                  confidence + '% confidence')
+
+    imageSource.close()
+    imageTarget.close()
+
+# Upload Image to a S3-Bucket
+
+
+def upload_image(upload_image):
+    # Filename in S3-Bucket
+    key = upload_image
+    myBucket = s3resource.Bucket(bucket)
+    myBucket.upload_file(key, key)
+
+# index_faces: Detect faces in an image and add them to a collection.
+
+
+def index_faces(index_image):
+    photo = index_image
+
+    client = boto3.client('rekognition', region_name=region)
+
+    response = client.index_faces(CollectionId=collectionId,
+                                  Image={'S3Object': {
+                                      'Bucket': bucket, 'Name': photo}},
+                                  ExternalImageId=photo,
+                                  MaxFaces=5,
+                                  QualityFilter="AUTO",
+                                  DetectionAttributes=['ALL'])
+
+    print('Results for ' + photo)
+    print('Faces indexed:')
+    for faceRecord in response['FaceRecords']:
+        print('  Face ID: ' + faceRecord['Face']['FaceId'])
+        print('  Location: {}'.format(faceRecord['Face']['BoundingBox']))
+
+    print('Faces not indexed:')
+    for unindexedFace in response['UnindexedFaces']:
+        print(' Location: {}'.format(
+            unindexedFace['FaceDetail']['BoundingBox']))
+        print(' Reasons:')
+        for reason in unindexedFace['Reasons']:
+            print('   ' + reason)
+
+    return response['FaceRecords']
+
+# delete_faces: Delete faces from a collection.
+
+
+def delete_faces(face_record):
+    for faceRecord in face_record:
+        faces = [faceRecord['Face']['FaceId']]
+
+    client = boto3.client('rekognition', region_name=region)
+
+    response = client.delete_faces(CollectionId=collectionId,
+                                   FaceIds=faces)
+
+    print(str(len(response['DeletedFaces'])) + ' faces deleted:')
+    for faceId in response['DeletedFaces']:
+        print(faceId)
+
+# Search for faces in a collection that match a supplied face ID
+
+
+def search_faces(face_record):
+    threshold = 98
+    maxFaces = 4
+
+    for faceRecord in face_record:
+        client = boto3.client('rekognition', region_name=region)
+
+        response = client.search_faces(CollectionId=collectionId,
+                                       FaceId=faceRecord['Face']['FaceId'],
+                                       FaceMatchThreshold=threshold,
+                                       MaxFaces=maxFaces)
+
+        print(response)
+        faceMatches = response['FaceMatches']
+        print('Matching faces')
+        for match in faceMatches:
+            print('FaceId: ' + match['Face']['FaceId'])
+            print('Similarity: ' + "{:.2f}".format(match['Similarity']) + "%")
+            print('ExternalImageId: ' + match['Face']['ExternalImageId'])
+
+    return faceMatches
+
+# Read Name from DynamoDB by Faces
+
+
+def read_name_by_faces(faceMatches):
+    for match in faceMatches:
+        faceid = match['Face']['FaceId']
+        print(faceid)
+        response = table.get_item(
+            Key={
+                'faceid': faceid
+            }
+        )
+        print(response)
+
+        item = response['Item']
+        name = item['first_name']
+        print(item)
+        print("Hello, {}" .format(name))
+
 # START MAIN
 
 
@@ -297,15 +441,29 @@ def draw_bounding_box(cv_img, cv_img_width, cv_img_height, width, height, top, l
 # if one argument open the image file and decode it
 # if more than on argument exit gracefully and print usage guidance
 if len(argv) == 1:
-    #encoded_image = take_photo(save=True)
-    take_image()
-    encoded_image = read_image('opencv_frame.jpg')
+    image_name = take_image()
 elif len(argv) == 2:
     print("opening image in file: ", argv[1])
-    encoded_image = read_image(argv[1])
+    image_name = argv[1]
 else:
     print("Use with no arguments to take a photo with the camera, or one argument to use a saved image")
     exit(-1)
+
+encoded_image = read_image(image_name)
+#upload_image(image_name)
+# Import Faces to Collection
+#face_record = index_faces(image_name)
+#print(face_record)
+
+# Search detected Faces from Image by FaceId
+#faceMatches = search_faces(face_record)
+#print(faceMatches)
+
+# Read Items from DynamoDB by FaceId
+#read_name_by_faces(faceMatches)
+
+# Delete Faces from Collection - House Keeping
+#delete_faces(face_record)
 
 labels = reko_detect_labels(encoded_image)
 humans, labels_response_string = create_verbal_response_labels(labels)
@@ -315,6 +473,16 @@ speak('label', labels_response_string, 'Joanna')
 if humans:
     print("Detected Human: ", humans, "\n")
     reko_response = reko_detect_faces(encoded_image)
+
+    all_faces=reko_response['FaceDetails']
+    # Initialize list object
+    # Crop face from image
+    for face in all_faces:
+        box=face['BoundingBox']
+
+    print(box)
+
+
     faces_response_string = create_verbal_response_face(reko_response)
     save_image_with_bounding_boxes(encoded_image, reko_response)
     print(faces_response_string)
